@@ -11,14 +11,14 @@ let package = Package(
     ],
     products: [
         .executable(name: "rockit-lsp", targets: ["RockitLSPCLI"]),
-        .library(name: "RockitLSP", targets: ["RockitLSP"]),
+        .library(name: "RockitLSPLib", targets: ["RockitLSPLib"]),
     ],
     dependencies: [
         .package(url: "https://github.com/dark-matter-tech/rockit-booster.git", branch: "master"),
     ],
     targets: [
         .target(
-            name: "RockitLSP",
+            name: "RockitLSPLib",
             dependencies: [
                 .product(name: "RockitKit", package: "rockit-booster"),
             ],
@@ -26,7 +26,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "RockitLSPCLI",
-            dependencies: ["RockitLSP"],
+            dependencies: ["RockitLSPLib"],
             path: "Sources/RockitLSPCLI"
         ),
     ]
