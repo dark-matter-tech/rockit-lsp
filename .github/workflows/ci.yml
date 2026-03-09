@@ -1,5 +1,6 @@
 name: CI
 
+# Rockit Language Server Protocol
 on:
   push:
     branches: [develop, master]
