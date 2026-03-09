@@ -57,7 +57,7 @@ jobs:
           GITHUB_TOKEN: ${{ gitea.token }}
       - name: Push to GitHub
         run: |
-          git remote add github "https://x-access-token:${GH_MIRROR_PAT}@github.com/dark-matter-tech/rockit-lsp.git"
+          git remote add github "https://x-access-token:${GH_MIRROR_PAT}@github.com/rockit-engine/rockit-lsp.git"
           git push github --all --force
           git push github --tags --force
           echo "Mirrored to GitHub"
