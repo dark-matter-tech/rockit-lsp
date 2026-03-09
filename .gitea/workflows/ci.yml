@@ -2,9 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [develop, master]
   pull_request:
-    branches: [master]
+    branches: [develop, master, staging]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,7 +41,7 @@ jobs:
     name: Mirror to GitHub
     runs-on: ubuntu-22.04
     needs: [build]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/staging')
     defaults:
       run:
         shell: bash
