@@ -1,0 +1,28 @@
+// analysis.rok — Compiler pipeline orchestration for LSP
+// Uses subprocess invocation since compiler modules are not concatenated.
+
+fun analyzeDocument(docMgr: Map, uri: String, kwMap: Map): Map {
+    // For now, return empty analysis — no inline compiler
+    // TODO: invoke `rockit check --json <file>` subprocess for diagnostics
+    val result = mapCreate()
+    mapPut(result, "tokens", listCreate())
+    mapPut(result, "ast", mapCreate())
+    mapPut(result, "tc", mapCreate())
+    mapPut(result, "diagnostics", jArr())
+    return result
+}
+
+fun getOrAnalyze(docMgr: Map, uri: String, kwMap: Map): Map {
+    val cached = docGetAnalysis(docMgr, uri)
+    if (cached != null) { return cached }
+    return analyzeDocument(docMgr, uri, kwMap)
+}
+
+fun makeDiagnostic(message: String, severity: Int): Map {
+    val diag = jsonObject()
+    jPutObj(diag, "range", makeLspRange(0, 0, 0, 1))
+    jPutInt(diag, "severity", severity)
+    jPutStr(diag, "source", "rockit")
+    jPutStr(diag, "message", message)
+    return diag
+}

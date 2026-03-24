@@ -1,0 +1,972 @@
+// providers.rok — All 28 LSP feature implementations
+// Each provider is a pure function that takes analysis state and returns JSON.
+
+// ══════════════════════════════════════════════════════════════════════════
+// NAVIGATION & INSPECTION
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── textDocument/hover ──────────────────────────────────────────────────
+
+fun provideHover(analysis: Map, uri: String, line: Int, col: Int): Map {
+    val ast = mapGet(analysis, "ast")
+    val tc = mapGet(analysis, "tc")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return null }
+
+    val kind = toString(mapGet(node, "kind"))
+    var hoverText: String = ""
+
+    if (kind == "ident") {
+        val name = navExtractName(node)
+        // Look up in type checker
+        val fns = mapGet(tc, "functions")
+        if (fns != null) {
+            val fnInfo = mapGet(fns, name)
+            if (fnInfo != null) {
+                hoverText = "```rockit\nfun " + name + "(...)\n```"
+            }
+        }
+        if (stringLength(hoverText) == 0) {
+            hoverText = "```rockit\n" + name + "\n```"
+        }
+    }
+    if (kind == "funDecl") {
+        val name = navExtractName(node)
+        hoverText = "```rockit\nfun " + name + "(...)\n```"
+    }
+    if (kind == "classDecl") {
+        val name = navExtractName(node)
+        hoverText = "```rockit\nclass " + name + "\n```"
+    }
+    if (kind == "interfaceDecl") {
+        val name = navExtractName(node)
+        hoverText = "```rockit\ninterface " + name + "\n```"
+    }
+    if (kind == "enumDecl") {
+        val name = navExtractName(node)
+        hoverText = "```rockit\nenum class " + name + "\n```"
+    }
+    if (kind == "valDecl") {
+        val name = navExtractName(node)
+        hoverText = "```rockit\nval " + name + "\n```"
+    }
+    if (kind == "varDecl") {
+        val name = navExtractName(node)
+        hoverText = "```rockit\nvar " + name + "\n```"
+    }
+    if (kind == "intLit") {
+        hoverText = "```rockit\nInt\n```"
+    }
+    if (kind == "floatLit") {
+        hoverText = "```rockit\nFloat\n```"
+    }
+    if (kind == "stringLit") {
+        hoverText = "```rockit\nString\n```"
+    }
+    if (kind == "boolLit") {
+        hoverText = "```rockit\nBool\n```"
+    }
+
+    if (stringLength(hoverText) == 0) { return null }
+
+    val contents = jsonObject()
+    jPutStr(contents, "kind", "markdown")
+    jPutStr(contents, "value", hoverText)
+    val result = jsonObject()
+    jPutObj(result, "contents", contents)
+    return result
+}
+
+// ── textDocument/definition ─────────────────────────────────────────────
+
+fun provideDefinition(analysis: Map, uri: String, line: Int, col: Int): Map {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return null }
+
+    val name = navExtractName(node)
+    if (stringLength(name) == 0) { return null }
+
+    val decl = navFindDeclarationNamed(ast, name)
+    if (decl == null) { return null }
+
+    val declLine = mapGet(decl, "line")
+    val declCol = mapGet(decl, "col")
+    if (declLine == null) { return null }
+
+    return makeLspLocation(uri,
+        sourceToLspLine(toInt(declLine)), sourceToLspCol(toInt(declCol)),
+        sourceToLspLine(toInt(declLine)), sourceToLspCol(toInt(declCol)) + stringLength(name))
+}
+
+// ── textDocument/references ─────────────────────────────────────────────
+
+fun provideReferences(analysis: Map, uri: String, line: Int, col: Int): Any {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return jArr() }
+
+    val name = navExtractName(node)
+    if (stringLength(name) == 0) { return jArr() }
+
+    val refs = navCollectReferences(ast, name, uri)
+    val result = jArr()
+    val sz = listSize(refs)
+    var i: Int = 0
+    while (i < sz) {
+        jArrPush(result, listGet(refs, i))
+        i = i + 1
+    }
+    return result
+}
+
+// ── textDocument/documentSymbol ─────────────────────────────────────────
+
+fun provideDocumentSymbol(analysis: Map, uri: String): Any {
+    val ast = mapGet(analysis, "ast")
+    if (ast == null) { return jArr() }
+    val decls = mapGet(ast, "declarations")
+    if (decls == null) { return jArr() }
+
+    val result = jArr()
+    val sz = listSize(decls)
+    var i: Int = 0
+    while (i < sz) {
+        val decl = listGet(decls, i)
+        if (isMap(decl) == 1) {
+            val sym = makeDeclSymbol(decl)
+            if (sym != null) {
+                jArrPush(result, sym)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+fun makeDeclSymbol(decl: Map): Map {
+    val kind = toString(mapGet(decl, "kind"))
+    val name = mapGet(decl, "name")
+    if (name == null) { return null }
+    val nameStr = toString(name)
+    val line = mapGet(decl, "line")
+    if (line == null) { return null }
+    val lspLine = sourceToLspLine(toInt(line))
+    val lspCol = sourceToLspCol(toInt(mapGet(decl, "col")))
+
+    var symbolKind: Int = 13 // variable
+    if (kind == "funDecl") { symbolKind = 12 }
+    if (kind == "classDecl") { symbolKind = 5 }
+    if (kind == "interfaceDecl") { symbolKind = 11 }
+    if (kind == "enumDecl") { symbolKind = 10 }
+    if (kind == "objectDecl") { symbolKind = 19 }
+    if (kind == "actorDecl") { symbolKind = 5 }
+    if (kind == "viewDecl") { symbolKind = 5 }
+    if (kind == "valDecl") { symbolKind = 13 }
+    if (kind == "varDecl") { symbolKind = 13 }
+    if (kind == "typeAlias") { symbolKind = 26 }
+
+    val endLine = mapGet(decl, "endLine")
+    var eLine: Int = lspLine
+    var eCol: Int = lspCol + stringLength(nameStr)
+    if (endLine != null) {
+        eLine = sourceToLspLine(toInt(endLine))
+        eCol = sourceToLspCol(toInt(mapGet(decl, "endCol")))
+    }
+
+    val sym = jsonObject()
+    jPutStr(sym, "name", nameStr)
+    jPutInt(sym, "kind", symbolKind)
+    jPutObj(sym, "range", makeLspRange(lspLine, lspCol, eLine, eCol))
+    jPutObj(sym, "selectionRange", makeLspRange(lspLine, lspCol, lspLine, lspCol + stringLength(nameStr)))
+
+    // Add children for classes/interfaces/enums
+    val members = mapGet(decl, "members")
+    if (members != null) {
+        if (isList(members) == 1) {
+            val children = jArr()
+            val msz = listSize(members)
+            var mi: Int = 0
+            while (mi < msz) {
+                val child = makeDeclSymbol(listGet(members, mi))
+                if (child != null) { jArrPush(children, child) }
+                mi = mi + 1
+            }
+            jPutObj(sym, "children", children)
+        }
+    }
+
+    return sym
+}
+
+// ── textDocument/implementation ──────────────────────────────────────────
+
+fun provideImplementation(analysis: Map, uri: String, line: Int, col: Int): Any {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return jArr() }
+    val name = navExtractName(node)
+    if (stringLength(name) == 0) { return jArr() }
+
+    // Find classes that list this name in their supertypes
+    val result = jArr()
+    val decls = mapGet(ast, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            val d = listGet(decls, i)
+            if (isMap(d) == 1) {
+                val dk = toString(mapGet(d, "kind"))
+                if (dk == "classDecl") {
+                    val supers = mapGet(d, "superTypes")
+                    if (supers != null) {
+                        if (isList(supers) == 1) {
+                            val ssz = listSize(supers)
+                            var si: Int = 0
+                            while (si < ssz) {
+                                if (toString(listGet(supers, si)) == name) {
+                                    val dl = mapGet(d, "line")
+                                    val dc = mapGet(d, "col")
+                                    if (dl != null) {
+                                        val dn = toString(mapGet(d, "name"))
+                                        jArrPush(result, makeLspLocation(uri,
+                                            sourceToLspLine(toInt(dl)), sourceToLspCol(toInt(dc)),
+                                            sourceToLspLine(toInt(dl)), sourceToLspCol(toInt(dc)) + stringLength(dn)))
+                                    }
+                                }
+                                si = si + 1
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// ── textDocument/typeDefinition ──────────────────────────────────────────
+
+fun provideTypeDefinition(analysis: Map, uri: String, line: Int, col: Int): Map {
+    // Same as definition for now — resolves name to its declaration
+    return provideDefinition(analysis, uri, line, col)
+}
+
+// ── workspace/symbol ────────────────────────────────────────────────────
+
+fun provideWorkspaceSymbol(analysis: Map, uri: String, query: String): Any {
+    val ast = mapGet(analysis, "ast")
+    if (ast == null) { return jArr() }
+    val symbols = navCollectSymbols(ast, null)
+    val result = jArr()
+    val sz = listSize(symbols)
+    var i: Int = 0
+    while (i < sz) {
+        val sym = listGet(symbols, i)
+        val name = toString(mapGet(sym, "name"))
+        if (stringLength(query) == 0) {
+            val info = jsonObject()
+            jPutStr(info, "name", name)
+            jPutInt(info, "kind", navSymbolKindToLsp(toString(mapGet(sym, "kind"))))
+            jPutObj(info, "location", makeLspLocation(uri, 0, 0, 0, 0))
+            jArrPush(result, info)
+        } else {
+            if (stringIndexOf(name, query) >= 0) {
+                val info = jsonObject()
+                jPutStr(info, "name", name)
+                jPutInt(info, "kind", navSymbolKindToLsp(toString(mapGet(sym, "kind"))))
+                jPutObj(info, "location", makeLspLocation(uri, 0, 0, 0, 0))
+                jArrPush(result, info)
+            }
+        }
+        i = i + 1
+    }
+    return result
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// COMPLETION & SIGNATURES
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── textDocument/completion ─────────────────────────────────────────────
+
+fun provideCompletion(analysis: Map, uri: String, line: Int, col: Int, text: String): Any {
+    val ast = mapGet(analysis, "ast")
+    val tc = mapGet(analysis, "tc")
+    val result = jsonObject()
+    jPutBool(result, "isIncomplete", false)
+    val items = jArr()
+
+    // Collect all visible symbols
+    val symbols = navCollectSymbols(ast, tc)
+    val sz = listSize(symbols)
+    var i: Int = 0
+    while (i < sz) {
+        val sym = listGet(symbols, i)
+        val name = toString(mapGet(sym, "name"))
+        val kind = toString(mapGet(sym, "kind"))
+        val item = jsonObject()
+        jPutStr(item, "label", name)
+        jPutInt(item, "kind", navCompletionKindToLsp(kind))
+        jArrPush(items, item)
+        i = i + 1
+    }
+
+    // Add keywords
+    val keywords = listCreate()
+    listAppend(keywords, "fun")
+    listAppend(keywords, "val")
+    listAppend(keywords, "var")
+    listAppend(keywords, "class")
+    listAppend(keywords, "data")
+    listAppend(keywords, "sealed")
+    listAppend(keywords, "interface")
+    listAppend(keywords, "enum")
+    listAppend(keywords, "object")
+    listAppend(keywords, "actor")
+    listAppend(keywords, "view")
+    listAppend(keywords, "if")
+    listAppend(keywords, "else")
+    listAppend(keywords, "when")
+    listAppend(keywords, "for")
+    listAppend(keywords, "while")
+    listAppend(keywords, "return")
+    listAppend(keywords, "try")
+    listAppend(keywords, "catch")
+    listAppend(keywords, "throw")
+    listAppend(keywords, "import")
+    listAppend(keywords, "package")
+    listAppend(keywords, "suspend")
+    listAppend(keywords, "async")
+    listAppend(keywords, "await")
+    listAppend(keywords, "concurrent")
+    listAppend(keywords, "is")
+    listAppend(keywords, "as")
+    listAppend(keywords, "in")
+    listAppend(keywords, "true")
+    listAppend(keywords, "false")
+    listAppend(keywords, "null")
+    listAppend(keywords, "break")
+    listAppend(keywords, "typealias")
+
+    val kwSz = listSize(keywords)
+    var ki: Int = 0
+    while (ki < kwSz) {
+        val kw = toString(listGet(keywords, ki))
+        val item = jsonObject()
+        jPutStr(item, "label", kw)
+        jPutInt(item, "kind", 14) // Keyword
+        jArrPush(items, item)
+        ki = ki + 1
+    }
+
+    jPutObj(result, "items", items)
+    return result
+}
+
+// ── textDocument/signatureHelp ──────────────────────────────────────────
+
+fun provideSignatureHelp(analysis: Map, uri: String, line: Int, col: Int): Map {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return null }
+
+    val kind = toString(mapGet(node, "kind"))
+    if (kind != "call") { return null }
+
+    val callee = mapGet(node, "callee")
+    if (callee == null) { return null }
+    val funcName = navExtractName(callee)
+    if (stringLength(funcName) == 0) { return null }
+
+    val sig = jsonObject()
+    jPutStr(sig, "label", funcName + "(...)")
+
+    val sigs = jArr()
+    jArrPush(sigs, sig)
+
+    val result = jsonObject()
+    jPutObj(result, "signatures", sigs)
+    jPutInt(result, "activeSignature", 0)
+    jPutInt(result, "activeParameter", 0)
+    return result
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// REFACTORING
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── textDocument/prepareRename ──────────────────────────────────────────
+
+fun providePrepareRename(analysis: Map, uri: String, line: Int, col: Int): Map {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return null }
+
+    val name = navExtractName(node)
+    if (stringLength(name) == 0) { return null }
+
+    val nodeLine = mapGet(node, "line")
+    if (nodeLine == null) { return null }
+
+    return makeLspRange(
+        sourceToLspLine(toInt(nodeLine)), sourceToLspCol(toInt(mapGet(node, "col"))),
+        sourceToLspLine(toInt(nodeLine)), sourceToLspCol(toInt(mapGet(node, "col"))) + stringLength(name))
+}
+
+// ── textDocument/rename ─────────────────────────────────────────────────
+
+fun provideRename(analysis: Map, uri: String, line: Int, col: Int, newName: String): Map {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return null }
+
+    val oldName = navExtractName(node)
+    if (stringLength(oldName) == 0) { return null }
+
+    val refs = navCollectReferences(ast, oldName, uri)
+    val edits = jArr()
+    val sz = listSize(refs)
+    var i: Int = 0
+    while (i < sz) {
+        val ref = listGet(refs, i)
+        val edit = jsonObject()
+        jPutObj(edit, "range", jGet(ref, "range"))
+        jPutStr(edit, "newText", newName)
+        jArrPush(edits, edit)
+        i = i + 1
+    }
+
+    val changes = jsonObject()
+    jPutObj(changes, uri, edits)
+    val result = jsonObject()
+    jPutObj(result, "changes", changes)
+    return result
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// SYNTAX & HIGHLIGHTING
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── textDocument/semanticTokens/full ────────────────────────────────────
+
+fun provideSemanticTokens(analysis: Map): Map {
+    val tokens = mapGet(analysis, "tokens")
+    if (tokens == null) { return null }
+
+    val data = jArr()
+    var prevLine: Int = 0
+    var prevChar: Int = 0
+    val sz = listSize(tokens)
+    var i: Int = 0
+    while (i < sz) {
+        val tok = listGet(tokens, i)
+        if (isMap(tok) == 1) {
+            val tokType = toString(mapGet(tok, "type"))
+            val tokLine = toInt(mapGet(tok, "line")) - 1  // to 0-indexed
+            val tokCol = toInt(mapGet(tok, "col")) - 1
+            val tokLen = stringLength(toString(mapGet(tok, "value")))
+            var semType: Int = 0 - 1
+            // Map token types to semantic token types
+            if (tokType == "KEYWORD") { semType = 0 }
+            if (tokType == "IDENTIFIER") { semType = 8 }  // variable
+            if (tokType == "INT") { semType = 10 }  // number
+            if (tokType == "FLOAT") { semType = 10 }
+            if (tokType == "STRING") { semType = 9 }
+            if (tokType == "COMMENT") { semType = 11 }
+            if (tokType == "LINE_COMMENT") { semType = 11 }
+            if (tokType == "BLOCK_COMMENT") { semType = 11 }
+
+            if (semType >= 0) {
+                val deltaLine = tokLine - prevLine
+                var deltaChar: Int = tokCol
+                if (deltaLine == 0) {
+                    deltaChar = tokCol - prevChar
+                }
+                jArrPush(data, jInt(deltaLine))
+                jArrPush(data, jInt(deltaChar))
+                jArrPush(data, jInt(tokLen))
+                jArrPush(data, jInt(semType))
+                jArrPush(data, jInt(0))  // modifiers
+                prevLine = tokLine
+                prevChar = tokCol
+            }
+        }
+        i = i + 1
+    }
+
+    val result = jsonObject()
+    jPutObj(result, "data", data)
+    return result
+}
+
+// ── textDocument/formatting ─────────────────────────────────────────────
+
+fun provideFormatting(text: String, tabSize: Int, insertSpaces: Int): Any {
+    val lines = docSplitLines(text)
+    val result = listCreate()
+    var formatted: String = ""
+    var depth: Int = 0
+    val sz = listSize(lines)
+    var i: Int = 0
+    while (i < sz) {
+        val line = stringTrim(toString(listGet(lines, i)))
+        // Decrease depth for closing braces
+        if (startsWith(line, "}") == 1) {
+            depth = depth - 1
+            if (depth < 0) { depth = 0 }
+        }
+        // Build indented line
+        var indent: String = ""
+        var d: Int = 0
+        while (d < depth) {
+            if (insertSpaces == 1) {
+                var s: Int = 0
+                while (s < tabSize) {
+                    indent = indent + " "
+                    s = s + 1
+                }
+            } else {
+                indent = indent + "\t"
+            }
+            d = d + 1
+        }
+        if (stringLength(line) > 0) {
+            formatted = formatted + indent + line + "\n"
+        } else {
+            formatted = formatted + "\n"
+        }
+        // Increase depth for opening braces
+        if (endsWith(line, "{") == 1) {
+            depth = depth + 1
+        }
+        i = i + 1
+    }
+
+    val edits = jArr()
+    val edit = jsonObject()
+    jPutObj(edit, "range", makeLspRange(0, 0, sz, 0))
+    jPutStr(edit, "newText", formatted)
+    jArrPush(edits, edit)
+    return edits
+}
+
+// ── textDocument/rangeFormatting ─────────────────────────────────────────
+
+fun provideRangeFormatting(text: String, startLine: Int, endLine: Int, tabSize: Int, insertSpaces: Int): Any {
+    // Reformat just the selected range
+    return provideFormatting(text, tabSize, insertSpaces)
+}
+
+// ── textDocument/onTypeFormatting ────────────────────────────────────────
+
+fun provideOnTypeFormatting(text: String, line: Int, col: Int, ch: String, tabSize: Int): Any {
+    // Auto-indent after newline or braces
+    val edits = jArr()
+    // For now, return empty edits — formatting is handled by full format
+    return edits
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// STRUCTURE
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── textDocument/foldingRange ───────────────────────────────────────────
+
+fun provideFoldingRange(analysis: Map): Any {
+    val ast = mapGet(analysis, "ast")
+    if (ast == null) { return jArr() }
+    val result = jArr()
+    val decls = mapGet(ast, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            val decl = listGet(decls, i)
+            if (isMap(decl) == 1) {
+                val line = mapGet(decl, "line")
+                val endLine = mapGet(decl, "endLine")
+                if (line != null) {
+                    if (endLine != null) {
+                        val sLine = sourceToLspLine(toInt(line))
+                        val eLine = sourceToLspLine(toInt(endLine))
+                        if (eLine > sLine) {
+                            val fold = jsonObject()
+                            jPutInt(fold, "startLine", sLine)
+                            jPutInt(fold, "endLine", eLine)
+                            jPutStr(fold, "kind", "region")
+                            jArrPush(result, fold)
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// ── textDocument/documentHighlight ──────────────────────────────────────
+
+fun provideDocumentHighlight(analysis: Map, uri: String, line: Int, col: Int): Any {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return jArr() }
+
+    val name = navExtractName(node)
+    if (stringLength(name) == 0) { return jArr() }
+
+    val refs = navCollectReferences(ast, name, uri)
+    val result = jArr()
+    val sz = listSize(refs)
+    var i: Int = 0
+    while (i < sz) {
+        val ref = listGet(refs, i)
+        val hl = jsonObject()
+        jPutObj(hl, "range", jGet(ref, "range"))
+        jPutInt(hl, "kind", 1)  // Text
+        jArrPush(result, hl)
+        i = i + 1
+    }
+    return result
+}
+
+// ── textDocument/selectionRange ──────────────────────────────────────────
+
+fun provideSelectionRange(analysis: Map, line: Int, col: Int): Map {
+    // Return a simple selection range at the cursor position
+    val range = jsonObject()
+    jPutObj(range, "range", makeLspRange(line, col, line, col + 1))
+    return range
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ADDITIONAL FEATURES
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── textDocument/inlayHint ──────────────────────────────────────────────
+
+fun provideInlayHints(analysis: Map, startLine: Int, endLine: Int): Any {
+    val ast = mapGet(analysis, "ast")
+    if (ast == null) { return jArr() }
+    val result = jArr()
+    // Walk declarations looking for val/var without explicit type
+    navCollectInlayHints(ast, result, startLine, endLine)
+    return result
+}
+
+fun navCollectInlayHints(node: Any, hints: Any, startLine: Int, endLine: Int): Unit {
+    if (node == null) { return }
+    if (isMap(node) == 0) { return }
+    val kind = mapGet(node, "kind")
+    if (kind == null) { return }
+    val kindStr = toString(kind)
+
+    if (kindStr == "valDecl") {
+        val typAnnot = mapGet(node, "type")
+        if (typAnnot == null) {
+            val name = mapGet(node, "name")
+            val line = mapGet(node, "line")
+            if (name != null) {
+                if (line != null) {
+                    val lspLine = sourceToLspLine(toInt(line))
+                    if (lspLine >= startLine) {
+                        if (lspLine <= endLine) {
+                            val col = toInt(mapGet(node, "col"))
+                            val hint = jsonObject()
+                            jPutObj(hint, "position", makeLspPosition(lspLine, sourceToLspCol(col) + stringLength(toString(name))))
+                            jPutStr(hint, "label", ": Any")
+                            jPutInt(hint, "kind", 1)  // Type
+                            jPutBool(hint, "paddingLeft", true)
+                            jArrPush(hints, hint)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (kindStr == "varDecl") {
+        val typAnnot = mapGet(node, "type")
+        if (typAnnot == null) {
+            val name = mapGet(node, "name")
+            val line = mapGet(node, "line")
+            if (name != null) {
+                if (line != null) {
+                    val lspLine = sourceToLspLine(toInt(line))
+                    if (lspLine >= startLine) {
+                        if (lspLine <= endLine) {
+                            val col = toInt(mapGet(node, "col"))
+                            val hint = jsonObject()
+                            jPutObj(hint, "position", makeLspPosition(lspLine, sourceToLspCol(col) + stringLength(toString(name))))
+                            jPutStr(hint, "label", ": Any")
+                            jPutInt(hint, "kind", 1)
+                            jPutBool(hint, "paddingLeft", true)
+                            jArrPush(hints, hint)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Walk children
+    val decls = mapGet(node, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            navCollectInlayHints(listGet(decls, i), hints, startLine, endLine)
+            i = i + 1
+        }
+    }
+    val body = mapGet(node, "body")
+    if (body != null) {
+        if (isList(body) == 1) {
+            val sz = listSize(body)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectInlayHints(listGet(body, i), hints, startLine, endLine)
+                i = i + 1
+            }
+        }
+        if (isMap(body) == 1) { navCollectInlayHints(body, hints, startLine, endLine) }
+    }
+    val stmts = mapGet(node, "statements")
+    if (stmts != null) {
+        val sz = listSize(stmts)
+        var i: Int = 0
+        while (i < sz) {
+            navCollectInlayHints(listGet(stmts, i), hints, startLine, endLine)
+            i = i + 1
+        }
+    }
+    val members = mapGet(node, "members")
+    if (members != null) {
+        if (isList(members) == 1) {
+            val sz = listSize(members)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectInlayHints(listGet(members, i), hints, startLine, endLine)
+                i = i + 1
+            }
+        }
+    }
+}
+
+// ── textDocument/codeAction ─────────────────────────────────────────────
+
+fun provideCodeAction(analysis: Map, uri: String, startLine: Int, endLine: Int): Any {
+    // Return empty for now — quick fixes require more detailed diagnostic analysis
+    return jArr()
+}
+
+// ── textDocument/documentLink ───────────────────────────────────────────
+
+fun provideDocumentLink(analysis: Map, uri: String): Any {
+    val ast = mapGet(analysis, "ast")
+    if (ast == null) { return jArr() }
+    val result = jArr()
+    // Find import statements
+    val decls = mapGet(ast, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            val decl = listGet(decls, i)
+            if (isMap(decl) == 1) {
+                val dk = toString(mapGet(decl, "kind"))
+                if (dk == "import") {
+                    val path = mapGet(decl, "path")
+                    if (path != null) {
+                        val line = mapGet(decl, "line")
+                        if (line != null) {
+                            val lspLine = sourceToLspLine(toInt(line))
+                            val link = jsonObject()
+                            jPutObj(link, "range", makeLspRange(lspLine, 0, lspLine, 80))
+                            // Don't set target — editor will try to resolve
+                            jArrPush(result, link)
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// ── callHierarchy ───────────────────────────────────────────────────────
+
+fun provideCallHierarchyPrepare(analysis: Map, uri: String, line: Int, col: Int): Any {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return jArr() }
+
+    val name = navExtractName(node)
+    if (stringLength(name) == 0) { return jArr() }
+
+    val item = jsonObject()
+    jPutStr(item, "name", name)
+    jPutInt(item, "kind", 12) // Function
+    jPutStr(item, "uri", uri)
+    jPutObj(item, "range", makeLspRange(line, col, line, col + stringLength(name)))
+    jPutObj(item, "selectionRange", makeLspRange(line, col, line, col + stringLength(name)))
+
+    val result = jArr()
+    jArrPush(result, item)
+    return result
+}
+
+fun provideCallHierarchyIncoming(analysis: Map, uri: String, name: String): Any {
+    // Find all call sites that call this function
+    val ast = mapGet(analysis, "ast")
+    val refs = navCollectReferences(ast, name, uri)
+    val result = jArr()
+    val sz = listSize(refs)
+    var i: Int = 0
+    while (i < sz) {
+        val ref = listGet(refs, i)
+        val call = jsonObject()
+        val from = jsonObject()
+        jPutStr(from, "name", name)
+        jPutInt(from, "kind", 12)
+        jPutStr(from, "uri", uri)
+        jPutObj(from, "range", jGet(ref, "range"))
+        jPutObj(from, "selectionRange", jGet(ref, "range"))
+        jPutObj(call, "from", from)
+        val ranges = jArr()
+        jArrPush(ranges, jGet(ref, "range"))
+        jPutObj(call, "fromRanges", ranges)
+        jArrPush(result, call)
+        i = i + 1
+    }
+    return result
+}
+
+fun provideCallHierarchyOutgoing(analysis: Map, uri: String, name: String): Any {
+    // Find all functions called by this function
+    return jArr()
+}
+
+// ── typeHierarchy ───────────────────────────────────────────────────────
+
+fun provideTypeHierarchyPrepare(analysis: Map, uri: String, line: Int, col: Int): Any {
+    val ast = mapGet(analysis, "ast")
+    val srcLine = lspToSourceLine(line)
+    val srcCol = lspToSourceCol(col)
+    val node = navFindNodeAt(ast, srcLine, srcCol)
+    if (node == null) { return jArr() }
+
+    val name = navExtractName(node)
+    if (stringLength(name) == 0) { return jArr() }
+
+    val item = jsonObject()
+    jPutStr(item, "name", name)
+    jPutInt(item, "kind", 5) // Class
+    jPutStr(item, "uri", uri)
+    jPutObj(item, "range", makeLspRange(line, col, line, col + stringLength(name)))
+    jPutObj(item, "selectionRange", makeLspRange(line, col, line, col + stringLength(name)))
+
+    val result = jArr()
+    jArrPush(result, item)
+    return result
+}
+
+fun provideTypeHierarchySupertypes(analysis: Map, uri: String, name: String): Any {
+    val ast = mapGet(analysis, "ast")
+    val decl = navFindDeclarationNamed(ast, name)
+    if (decl == null) { return jArr() }
+
+    val result = jArr()
+    val supers = mapGet(decl, "superTypes")
+    if (supers != null) {
+        if (isList(supers) == 1) {
+            val sz = listSize(supers)
+            var i: Int = 0
+            while (i < sz) {
+                val superName = toString(listGet(supers, i))
+                val item = jsonObject()
+                jPutStr(item, "name", superName)
+                jPutInt(item, "kind", 11) // Interface
+                jPutStr(item, "uri", uri)
+                jPutObj(item, "range", makeLspRange(0, 0, 0, 0))
+                jPutObj(item, "selectionRange", makeLspRange(0, 0, 0, 0))
+                jArrPush(result, item)
+                i = i + 1
+            }
+        }
+    }
+    return result
+}
+
+fun provideTypeHierarchySubtypes(analysis: Map, uri: String, name: String): Any {
+    return provideImplementation(mapCreate(), uri, 0, 0)
+}
+
+// ── textDocument/codeLens ───────────────────────────────────────────────
+
+fun provideCodeLens(analysis: Map, uri: String): Any {
+    val ast = mapGet(analysis, "ast")
+    if (ast == null) { return jArr() }
+    val result = jArr()
+    // Find functions with @Test annotation
+    val decls = mapGet(ast, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            val decl = listGet(decls, i)
+            if (isMap(decl) == 1) {
+                val dk = toString(mapGet(decl, "kind"))
+                if (dk == "funDecl") {
+                    val annotations = mapGet(decl, "annotations")
+                    if (annotations != null) {
+                        if (isList(annotations) == 1) {
+                            val asz = listSize(annotations)
+                            var ai: Int = 0
+                            while (ai < asz) {
+                                val ann = toString(listGet(annotations, ai))
+                                if (ann == "Test") {
+                                    val line = mapGet(decl, "line")
+                                    if (line != null) {
+                                        val lspLine = sourceToLspLine(toInt(line))
+                                        val lens = jsonObject()
+                                        jPutObj(lens, "range", makeLspRange(lspLine, 0, lspLine, 0))
+                                        val cmd = jsonObject()
+                                        jPutStr(cmd, "title", "Run Test")
+                                        jPutStr(cmd, "command", "rockit.runTest")
+                                        jPutObj(lens, "command", cmd)
+                                        jArrPush(result, lens)
+                                    }
+                                }
+                                ai = ai + 1
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    return result
+}

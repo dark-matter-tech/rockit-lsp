@@ -1,0 +1,412 @@
+// lsp.rok — Rockit Language Server main loop and message dispatch
+// This module contains main(). All other modules are concatenated before it.
+
+// ── Server state ────────────────────────────────────────────────────────
+
+var lspInitialized: Int = 0
+var lspShutdown: Int = 0
+var lspWorkspaceRoot: String = ""
+
+// ── Initialize handler ──────────────────────────────────────────────────
+
+fun handleInitialize(id: Int, params: Any): Unit {
+    val rootUri = jGet(params, "rootUri")
+    if (rootUri != null) {
+        lspWorkspaceRoot = uriToPath(jGetStr(params, "rootUri"))
+    }
+    val caps = jsonObject()
+    val syncOpts = jsonObject()
+    jPutBool(syncOpts, "openClose", true)
+    jPutInt(syncOpts, "change", 1)
+    jPutObj(caps, "textDocumentSync", syncOpts)
+    jPutBool(caps, "hoverProvider", true)
+    val compOpts = jsonObject()
+    val triggers = jArr()
+    jArrPush(triggers, jStr("."))
+    jArrPush(triggers, jStr(":"))
+    jPutObj(compOpts, "triggerCharacters", triggers)
+    jPutBool(compOpts, "resolveProvider", false)
+    jPutObj(caps, "completionProvider", compOpts)
+    jPutBool(caps, "definitionProvider", true)
+    jPutBool(caps, "referencesProvider", true)
+    jPutBool(caps, "documentSymbolProvider", true)
+    val sigOpts = jsonObject()
+    val sigTriggers = jArr()
+    jArrPush(sigTriggers, jStr("("))
+    jArrPush(sigTriggers, jStr(","))
+    jPutObj(sigOpts, "triggerCharacters", sigTriggers)
+    jPutObj(caps, "signatureHelpProvider", sigOpts)
+    val renameOpts = jsonObject()
+    jPutBool(renameOpts, "prepareProvider", true)
+    jPutObj(caps, "renameProvider", renameOpts)
+    val semOpts = jsonObject()
+    val legend = jsonObject()
+    val tokenTypes = jArr()
+    jArrPush(tokenTypes, jStr("keyword"))
+    jArrPush(tokenTypes, jStr("type"))
+    jArrPush(tokenTypes, jStr("class"))
+    jArrPush(tokenTypes, jStr("enum"))
+    jArrPush(tokenTypes, jStr("interface"))
+    jArrPush(tokenTypes, jStr("struct"))
+    jArrPush(tokenTypes, jStr("function"))
+    jArrPush(tokenTypes, jStr("method"))
+    jArrPush(tokenTypes, jStr("parameter"))
+    jArrPush(tokenTypes, jStr("variable"))
+    jArrPush(tokenTypes, jStr("number"))
+    jArrPush(tokenTypes, jStr("string"))
+    jArrPush(tokenTypes, jStr("comment"))
+    jArrPush(tokenTypes, jStr("operator"))
+    val tokenModifiers = jArr()
+    jArrPush(tokenModifiers, jStr("declaration"))
+    jArrPush(tokenModifiers, jStr("definition"))
+    jArrPush(tokenModifiers, jStr("readonly"))
+    jPutObj(legend, "tokenTypes", tokenTypes)
+    jPutObj(legend, "tokenModifiers", tokenModifiers)
+    jPutObj(semOpts, "legend", legend)
+    jPutBool(semOpts, "full", true)
+    jPutObj(caps, "semanticTokensProvider", semOpts)
+    jPutBool(caps, "documentFormattingProvider", true)
+    jPutBool(caps, "documentRangeFormattingProvider", true)
+    jPutBool(caps, "inlayHintProvider", true)
+    jPutBool(caps, "workspaceSymbolProvider", true)
+    jPutBool(caps, "foldingRangeProvider", true)
+    jPutBool(caps, "documentHighlightProvider", true)
+    jPutBool(caps, "selectionRangeProvider", true)
+    jPutBool(caps, "implementationProvider", true)
+    jPutBool(caps, "typeDefinitionProvider", true)
+    jPutBool(caps, "callHierarchyProvider", true)
+    jPutBool(caps, "typeHierarchyProvider", true)
+    val clOpts = jsonObject()
+    jPutBool(clOpts, "resolveProvider", false)
+    jPutObj(caps, "codeLensProvider", clOpts)
+    val result = jsonObject()
+    jPutObj(result, "capabilities", caps)
+    val serverInfo = jsonObject()
+    jPutStr(serverInfo, "name", "rockit-lsp")
+    jPutStr(serverInfo, "version", "0.1.0")
+    jPutObj(result, "serverInfo", serverInfo)
+    rpcWriteResponse(id, result)
+    lspInitialized = 1
+}
+
+// ── Document lifecycle handlers ─────────────────────────────────────────
+
+fun handleDidOpen(params: Any, docMgr: Map, kwMap: Map): Unit {
+    val td = jGet(params, "textDocument")
+    if (td == null) { return }
+    val uri = jGetStr(td, "uri")
+    val text = jGetStr(td, "text")
+    val version = jGetInt(td, "version")
+    docOpen(docMgr, uri, text, version)
+    val analysis = analyzeDocument(docMgr, uri, kwMap)
+    rpcPublishDiagnostics(uri, mapGet(analysis, "diagnostics"))
+}
+
+fun handleDidChange(params: Any, docMgr: Map, kwMap: Map): Unit {
+    val td = jGet(params, "textDocument")
+    if (td == null) { return }
+    val uri = jGetStr(td, "uri")
+    val version = jGetInt(td, "version")
+    val changes = jGet(params, "contentChanges")
+    if (changes == null) { return }
+    val sz = jArrSize(changes)
+    if (sz > 0) {
+        val lastChange = jArrGet(changes, sz - 1)
+        val text = jGetStr(lastChange, "text")
+        docUpdate(docMgr, uri, text, version)
+        val analysis = analyzeDocument(docMgr, uri, kwMap)
+        rpcPublishDiagnostics(uri, mapGet(analysis, "diagnostics"))
+    }
+}
+
+fun handleDidClose(params: Any, docMgr: Map): Unit {
+    val td = jGet(params, "textDocument")
+    if (td == null) { return }
+    docClose(docMgr, jGetStr(td, "uri"))
+}
+
+fun handleDidSave(params: Any, docMgr: Map, kwMap: Map): Unit {
+    val td = jGet(params, "textDocument")
+    if (td == null) { return }
+    val uri = jGetStr(td, "uri")
+    val analysis = analyzeDocument(docMgr, uri, kwMap)
+    rpcPublishDiagnostics(uri, mapGet(analysis, "diagnostics"))
+}
+
+// ── Dispatch: Navigation ────────────────────────────────────────────────
+
+fun dispatchNavigation(method: String, id: Int, params: Any, docMgr: Map, kwMap: Map): Int {
+    if (method == "textDocument/hover") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val a = getOrAnalyze(docMgr, uri, kwMap)
+        val r = provideHover(a, uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")))
+        if (r != null) { rpcWriteResponse(id, r) } else { rpcWriteResponseNull(id) }
+        return 1
+    }
+    if (method == "textDocument/definition") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val a = getOrAnalyze(docMgr, uri, kwMap)
+        val r = provideDefinition(a, uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")))
+        if (r != null) { rpcWriteResponse(id, r) } else { rpcWriteResponseNull(id) }
+        return 1
+    }
+    if (method == "textDocument/references") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val a = getOrAnalyze(docMgr, uri, kwMap)
+        rpcWriteResponse(id, provideReferences(a, uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character"))))
+        return 1
+    }
+    if (method == "textDocument/documentSymbol") {
+        val uri = rpcGetTextDocumentUri(params)
+        rpcWriteResponse(id, provideDocumentSymbol(getOrAnalyze(docMgr, uri, kwMap), uri))
+        return 1
+    }
+    if (method == "textDocument/implementation") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        rpcWriteResponse(id, provideImplementation(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character"))))
+        return 1
+    }
+    if (method == "textDocument/typeDefinition") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val r = provideTypeDefinition(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")))
+        if (r != null) { rpcWriteResponse(id, r) } else { rpcWriteResponseNull(id) }
+        return 1
+    }
+    if (method == "workspace/symbol") {
+        val query = jGetStr(params, "query")
+        val keys = mapKeys(docMgr)
+        if (listSize(keys) > 0) {
+            val uri = toString(listGet(keys, 0))
+            rpcWriteResponse(id, provideWorkspaceSymbol(getOrAnalyze(docMgr, uri, kwMap), uri, query))
+        } else { rpcWriteResponse(id, jArr()) }
+        return 1
+    }
+    return 0
+}
+
+// ── Dispatch: Completion & Editing ──────────────────────────────────────
+
+fun dispatchEditing(method: String, id: Int, params: Any, docMgr: Map, kwMap: Map): Int {
+    if (method == "textDocument/completion") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val text = docGetText(docMgr, uri)
+        rpcWriteResponse(id, provideCompletion(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")), text))
+        return 1
+    }
+    if (method == "textDocument/signatureHelp") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val r = provideSignatureHelp(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")))
+        if (r != null) { rpcWriteResponse(id, r) } else { rpcWriteResponseNull(id) }
+        return 1
+    }
+    if (method == "textDocument/prepareRename") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val r = providePrepareRename(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")))
+        if (r != null) { rpcWriteResponse(id, r) } else { rpcWriteResponseNull(id) }
+        return 1
+    }
+    if (method == "textDocument/rename") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        val newName = jGetStr(params, "newName")
+        val r = provideRename(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")), newName)
+        if (r != null) { rpcWriteResponse(id, r) } else { rpcWriteResponseNull(id) }
+        return 1
+    }
+    if (method == "textDocument/formatting") {
+        val uri = rpcGetTextDocumentUri(params)
+        val text = docGetText(docMgr, uri)
+        rpcWriteResponse(id, provideFormatting(text, 4, 1))
+        return 1
+    }
+    if (method == "textDocument/rangeFormatting") {
+        val uri = rpcGetTextDocumentUri(params)
+        rpcWriteResponse(id, provideRangeFormatting(docGetText(docMgr, uri), 0, 0, 4, 1))
+        return 1
+    }
+    return 0
+}
+
+// ── Dispatch: Structure & Tokens ────────────────────────────────────────
+
+fun dispatchStructure(method: String, id: Int, params: Any, docMgr: Map, kwMap: Map): Int {
+    if (method == "textDocument/semanticTokens/full") {
+        val uri = rpcGetTextDocumentUri(params)
+        val r = provideSemanticTokens(getOrAnalyze(docMgr, uri, kwMap))
+        if (r != null) { rpcWriteResponse(id, r) } else { rpcWriteResponseNull(id) }
+        return 1
+    }
+    if (method == "textDocument/foldingRange") {
+        rpcWriteResponse(id, provideFoldingRange(getOrAnalyze(docMgr, rpcGetTextDocumentUri(params), kwMap)))
+        return 1
+    }
+    if (method == "textDocument/documentHighlight") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        rpcWriteResponse(id, provideDocumentHighlight(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character"))))
+        return 1
+    }
+    if (method == "textDocument/selectionRange") {
+        val positions = jGet(params, "positions")
+        val result = jArr()
+        if (positions != null) {
+            val sz = jArrSize(positions)
+            var pi: Int = 0
+            while (pi < sz) {
+                val p = jArrGet(positions, pi)
+                jArrPush(result, provideSelectionRange(getOrAnalyze(docMgr, rpcGetTextDocumentUri(params), kwMap), jGetInt(p, "line"), jGetInt(p, "character")))
+                pi = pi + 1
+            }
+        }
+        rpcWriteResponse(id, result)
+        return 1
+    }
+    if (method == "textDocument/inlayHint") {
+        val uri = rpcGetTextDocumentUri(params)
+        var sl: Int = 0
+        var el: Int = 99999
+        val range = jGet(params, "range")
+        if (range != null) {
+            val s = jGet(range, "start")
+            val e = jGet(range, "end")
+            if (s != null) { sl = jGetInt(s, "line") }
+            if (e != null) { el = jGetInt(e, "line") }
+        }
+        rpcWriteResponse(id, provideInlayHints(getOrAnalyze(docMgr, uri, kwMap), sl, el))
+        return 1
+    }
+    if (method == "textDocument/codeAction") {
+        rpcWriteResponse(id, provideCodeAction(getOrAnalyze(docMgr, rpcGetTextDocumentUri(params), kwMap), rpcGetTextDocumentUri(params), 0, 0))
+        return 1
+    }
+    if (method == "textDocument/documentLink") {
+        val uri = rpcGetTextDocumentUri(params)
+        rpcWriteResponse(id, provideDocumentLink(getOrAnalyze(docMgr, uri, kwMap), uri))
+        return 1
+    }
+    if (method == "textDocument/codeLens") {
+        val uri = rpcGetTextDocumentUri(params)
+        rpcWriteResponse(id, provideCodeLens(getOrAnalyze(docMgr, uri, kwMap), uri))
+        return 1
+    }
+    return 0
+}
+
+// ── Dispatch: Hierarchy ─────────────────────────────────────────────────
+
+fun dispatchHierarchy(method: String, id: Int, params: Any, docMgr: Map, kwMap: Map): Int {
+    if (method == "textDocument/prepareCallHierarchy") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        rpcWriteResponse(id, provideCallHierarchyPrepare(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character"))))
+        return 1
+    }
+    if (method == "callHierarchy/incomingCalls") {
+        val item = jGet(params, "item")
+        if (item != null) {
+            val uri = jGetStr(item, "uri")
+            rpcWriteResponse(id, provideCallHierarchyIncoming(getOrAnalyze(docMgr, uri, kwMap), uri, jGetStr(item, "name")))
+        } else { rpcWriteResponse(id, jArr()) }
+        return 1
+    }
+    if (method == "callHierarchy/outgoingCalls") {
+        val item = jGet(params, "item")
+        if (item != null) {
+            val uri = jGetStr(item, "uri")
+            rpcWriteResponse(id, provideCallHierarchyOutgoing(getOrAnalyze(docMgr, uri, kwMap), uri, jGetStr(item, "name")))
+        } else { rpcWriteResponse(id, jArr()) }
+        return 1
+    }
+    if (method == "textDocument/prepareTypeHierarchy") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        rpcWriteResponse(id, provideTypeHierarchyPrepare(getOrAnalyze(docMgr, uri, kwMap), uri, toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character"))))
+        return 1
+    }
+    if (method == "typeHierarchy/supertypes") {
+        val item = jGet(params, "item")
+        if (item != null) {
+            val uri = jGetStr(item, "uri")
+            rpcWriteResponse(id, provideTypeHierarchySupertypes(getOrAnalyze(docMgr, uri, kwMap), uri, jGetStr(item, "name")))
+        } else { rpcWriteResponse(id, jArr()) }
+        return 1
+    }
+    if (method == "typeHierarchy/subtypes") {
+        val item = jGet(params, "item")
+        if (item != null) {
+            val uri = jGetStr(item, "uri")
+            rpcWriteResponse(id, provideTypeHierarchySubtypes(getOrAnalyze(docMgr, uri, kwMap), uri, jGetStr(item, "name")))
+        } else { rpcWriteResponse(id, jArr()) }
+        return 1
+    }
+    return 0
+}
+
+// ── Main dispatch ───────────────────────────────────────────────────────
+
+fun lspDispatch(method: String, id: Int, params: Any, docMgr: Map, kwMap: Map): Unit {
+    if (method == "initialize") {
+        handleInitialize(id, params)
+        return
+    }
+    if (method == "initialized") { return }
+    if (method == "shutdown") {
+        lspShutdown = 1
+        rpcWriteResponseNull(id)
+        return
+    }
+    if (method == "textDocument/didOpen") {
+        handleDidOpen(params, docMgr, kwMap)
+        return
+    }
+    if (method == "textDocument/didChange") {
+        handleDidChange(params, docMgr, kwMap)
+        return
+    }
+    if (method == "textDocument/didClose") {
+        handleDidClose(params, docMgr)
+        return
+    }
+    if (method == "textDocument/didSave") {
+        handleDidSave(params, docMgr, kwMap)
+        return
+    }
+    if (method == "textDocument/onTypeFormatting") {
+        val uri = rpcGetTextDocumentUri(params)
+        val pos = rpcGetPosition(params)
+        rpcWriteResponse(id, provideOnTypeFormatting(docGetText(docMgr, uri), toInt(mapGet(pos, "line")), toInt(mapGet(pos, "character")), jGetStr(params, "ch"), 4))
+        return
+    }
+    if (dispatchNavigation(method, id, params, docMgr, kwMap) == 1) { return }
+    if (dispatchEditing(method, id, params, docMgr, kwMap) == 1) { return }
+    if (dispatchStructure(method, id, params, docMgr, kwMap) == 1) { return }
+    if (dispatchHierarchy(method, id, params, docMgr, kwMap) == 1) { return }
+    if (id > 0) {
+        rpcWriteError(id, 0 - 32601, "Method not found: " + method)
+    }
+}
+
+// ── Main ────────────────────────────────────────────────────────────────
+
+fun main() {
+    val docMgr = docManagerCreate()
+    val kwMap = mapCreate()
+
+    while (lspShutdown == 0) {
+        val msg = rpcReadMessage()
+        if (msg == null) { break }
+        val id = rpcGetId(msg)
+        val method = rpcGetMethod(msg)
+        lspDispatch(method, id, rpcGetParams(msg), docMgr, kwMap)
+        if (method == "exit") { break }
+    }
+    rpcLog("rockit-lsp shutting down.")
+}

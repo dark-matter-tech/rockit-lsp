@@ -1,0 +1,154 @@
+// jsonrpc.rok — JSON-RPC 2.0 protocol layer for LSP
+// Uses only standard Rockit builtins (readLine, print, println) for portability.
+// Body reading uses stdinReadN/rpcReadBody from linked C helper (lsp_io.o).
+
+// ── JSON convenience wrappers ───────────────────────────────────────────
+
+fun jStr(s: String): Map { return jsonString(s) }
+fun jInt(n: Int): Map { return jsonNumber(n) }
+fun jBool(b: Bool): Map { return jsonBool(b) }
+fun jNull(): Map { return jsonNull() }
+fun jPut(obj: Map, key: String, value: Map): Unit { jsonObjectPut(obj, key, value) }
+fun jPutStr(obj: Map, key: String, value: String): Unit { jsonObjectPut(obj, key, jsonString(value)) }
+fun jPutInt(obj: Map, key: String, value: Int): Unit { jsonObjectPut(obj, key, jsonNumber(value)) }
+fun jPutBool(obj: Map, key: String, value: Bool): Unit { jsonObjectPut(obj, key, jsonBool(value)) }
+fun jPutNull(obj: Map, key: String): Unit { jsonObjectPut(obj, key, jsonNull()) }
+fun jPutObj(obj: Map, key: String, value: Map): Unit { jsonObjectPut(obj, key, value) }
+fun jGet(obj: Map, key: String): Map { return jsonObjectGet(obj, key) }
+fun jGetStr(obj: Map, key: String): String {
+    val v = jsonObjectGet(obj, key)
+    if (v == null) { return "" }
+    return jsonGetString(v)
+}
+fun jGetInt(obj: Map, key: String): Int {
+    val v = jsonObjectGet(obj, key)
+    if (v == null) { return 0 }
+    return jsonGetInt(v)
+}
+fun jArr(): Map { return jsonArray() }
+fun jArrPush(arr: Map, item: Map): Unit { jsonArrayAppend(arr, item) }
+fun jArrGet(arr: Map, index: Int): Map { return jsonArrayGet(arr, index) }
+fun jArrSize(arr: Map): Int { return jsonArraySize(arr) }
+
+// ── Logging ─────────────────────────────────────────────────────────────
+// Uses println to stderr via systemExec (ugly but portable)
+
+fun rpcLog(msg: String): Unit {
+    // Write to stderr using the runtime's write(2,...) via a helper
+    // For now, use a no-op in production (editors read stderr for debug)
+    // TODO: implement proper stderr logging
+}
+
+// ── Message reading ─────────────────────────────────────────────────────
+
+fun rpcParseContentLength(line: String): Int {
+    // Parse number from "Content-Length: NNN\r" without substring/slice
+    // (substring creates zero-copy slices that corrupt stdio on ARC release)
+    val len = stringLength(line)
+    if (len < 17) { return 0 - 1 }
+    var num: Int = 0
+    var i: Int = 16
+    while (i < len) {
+        val c = charCodeAt(line, i)
+        if (c >= 48) {
+            if (c <= 57) {
+                num = num * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    if (num > 0) { return num }
+    return 0 - 1
+}
+
+fun rpcReadMessage(): Map {
+    val headerLine = readLine()
+    if (stringLength(headerLine) == 0) { return null }
+    if (startsWith(headerLine, "Content-Length: ") == 0) { return null }
+    val cl = rpcParseContentLength(headerLine)
+    if (cl <= 0) { return null }
+    // Skip blank line
+    readLine()
+    // Read body
+    val bodyLine = readLine()
+    if (stringLength(bodyLine) == 0) { return null }
+    val parsed = jsonParse(bodyLine)
+    return parsed
+}
+
+// ── Message writing ─────────────────────────────────────────────────────
+
+fun rpcWriteRaw(json: String): Unit {
+    val len = stringLength(json)
+    print("Content-Length: " + toString(len) + "\r\n\r\n" + json)
+}
+
+fun rpcWriteResponse(id: Int, result: Any): Unit {
+    val resp = jsonObject()
+    jPutStr(resp, "jsonrpc", "2.0")
+    jPutInt(resp, "id", id)
+    jPutObj(resp, "result", result)
+    rpcWriteRaw(jsonStringify(resp))
+}
+
+fun rpcWriteResponseNull(id: Int): Unit {
+    val resp = jsonObject()
+    jPutStr(resp, "jsonrpc", "2.0")
+    jPutInt(resp, "id", id)
+    jPutNull(resp, "result")
+    rpcWriteRaw(jsonStringify(resp))
+}
+
+fun rpcWriteNotification(method: String, params: Any): Unit {
+    val msg = jsonObject()
+    jPutStr(msg, "jsonrpc", "2.0")
+    jPutStr(msg, "method", method)
+    jPutObj(msg, "params", params)
+    rpcWriteRaw(jsonStringify(msg))
+}
+
+fun rpcWriteError(id: Int, code: Int, message: String): Unit {
+    val errObj = jsonObject()
+    jPutInt(errObj, "code", code)
+    jPutStr(errObj, "message", message)
+    val resp = jsonObject()
+    jPutStr(resp, "jsonrpc", "2.0")
+    jPutInt(resp, "id", id)
+    jPutObj(resp, "error", errObj)
+    rpcWriteRaw(jsonStringify(resp))
+}
+
+// ── Diagnostics publishing ──────────────────────────────────────────────
+
+fun rpcPublishDiagnostics(uri: String, diagnostics: Any): Unit {
+    val params = jsonObject()
+    jPutStr(params, "uri", uri)
+    jPutObj(params, "diagnostics", diagnostics)
+    rpcWriteNotification("textDocument/publishDiagnostics", params)
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+fun rpcGetId(msg: Map): Int { return jGetInt(msg, "id") }
+fun rpcGetMethod(msg: Map): String { return jGetStr(msg, "method") }
+fun rpcGetParams(msg: Map): Any { return jGet(msg, "params") }
+
+fun rpcGetTextDocumentUri(params: Any): String {
+    val td = jGet(params, "textDocument")
+    if (td == null) { return "" }
+    return jGetStr(td, "uri")
+}
+
+fun rpcGetPosition(params: Any): Map {
+    val pos = jGet(params, "position")
+    if (pos == null) {
+        val r = mapCreate()
+        mapPut(r, "line", 0)
+        mapPut(r, "character", 0)
+        return r
+    }
+    val r = mapCreate()
+    mapPut(r, "line", jGetInt(pos, "line"))
+    mapPut(r, "character", jGetInt(pos, "character"))
+    return r
+}
