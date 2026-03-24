@@ -1,0 +1,577 @@
+// navigator.rok — AST navigation for LSP features
+// Finds nodes at positions, collects visible symbols, searches for declarations.
+// Operates on the Map-based AST produced by parser.rok.
+
+// ── Node-at-position finding ────────────────────────────────────────────
+
+fun navNodeInRange(node: Any, line: Int, col: Int): Int {
+    if (node == null) { return 0 }
+    if (isMap(node) == 0) { return 0 }
+    val nodeLine = mapGet(node, "line")
+    if (nodeLine == null) { return 0 }
+    val nLine = toInt(nodeLine)
+    val nCol = toInt(mapGet(node, "col"))
+    // Check end position if available
+    val endLine = mapGet(node, "endLine")
+    if (endLine != null) {
+        val eLine = toInt(endLine)
+        val eCol = toInt(mapGet(node, "endCol"))
+        if (line < nLine) { return 0 }
+        if (line > eLine) { return 0 }
+        if (line == nLine) {
+            if (col < nCol) { return 0 }
+        }
+        if (line == eLine) {
+            if (col > eCol) { return 0 }
+        }
+        return 1
+    }
+    // No end position: just check if we're at or after the start
+    if (line == nLine) {
+        if (col >= nCol) { return 1 }
+    }
+    return 0
+}
+
+fun navFindNodeAt(ast: Any, line: Int, col: Int): Map {
+    if (ast == null) { return null }
+    if (isMap(ast) == 0) { return null }
+    val kind = mapGet(ast, "kind")
+    if (kind == null) { return null }
+    val kindStr = toString(kind)
+
+    // Check children first (find innermost match)
+    val body = mapGet(ast, "body")
+    if (body != null) {
+        if (isList(body) == 1) {
+            val sz = listSize(body)
+            var i: Int = 0
+            while (i < sz) {
+                val child = listGet(body, i)
+                val found = navFindNodeAt(child, line, col)
+                if (found != null) { return found }
+                i = i + 1
+            }
+        }
+        if (isMap(body) == 1) {
+            val found = navFindNodeAt(body, line, col)
+            if (found != null) { return found }
+        }
+    }
+
+    // Check declarations list
+    val decls = mapGet(ast, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            val child = listGet(decls, i)
+            val found = navFindNodeAt(child, line, col)
+            if (found != null) { return found }
+            i = i + 1
+        }
+    }
+
+    // Check statements
+    val stmts = mapGet(ast, "statements")
+    if (stmts != null) {
+        val sz = listSize(stmts)
+        var i: Int = 0
+        while (i < sz) {
+            val child = listGet(stmts, i)
+            val found = navFindNodeAt(child, line, col)
+            if (found != null) { return found }
+            i = i + 1
+        }
+    }
+
+    // Check expression sub-nodes
+    val left = mapGet(ast, "left")
+    if (left != null) {
+        val found = navFindNodeAt(left, line, col)
+        if (found != null) { return found }
+    }
+    val right = mapGet(ast, "right")
+    if (right != null) {
+        val found = navFindNodeAt(right, line, col)
+        if (found != null) { return found }
+    }
+    val callee = mapGet(ast, "callee")
+    if (callee != null) {
+        val found = navFindNodeAt(callee, line, col)
+        if (found != null) { return found }
+    }
+    val objNode = mapGet(ast, "object")
+    if (objNode != null) {
+        val found = navFindNodeAt(objNode, line, col)
+        if (found != null) { return found }
+    }
+    val condition = mapGet(ast, "condition")
+    if (condition != null) {
+        val found = navFindNodeAt(condition, line, col)
+        if (found != null) { return found }
+    }
+    val value = mapGet(ast, "value")
+    if (value != null) {
+        if (isMap(value) == 1) {
+            val found = navFindNodeAt(value, line, col)
+            if (found != null) { return found }
+        }
+    }
+    val args = mapGet(ast, "args")
+    if (args != null) {
+        if (isList(args) == 1) {
+            val sz = listSize(args)
+            var i: Int = 0
+            while (i < sz) {
+                val arg = listGet(args, i)
+                val found = navFindNodeAt(arg, line, col)
+                if (found != null) { return found }
+                i = i + 1
+            }
+        }
+    }
+    val members = mapGet(ast, "members")
+    if (members != null) {
+        if (isList(members) == 1) {
+            val sz = listSize(members)
+            var i: Int = 0
+            while (i < sz) {
+                val member = listGet(members, i)
+                val found = navFindNodeAt(member, line, col)
+                if (found != null) { return found }
+                i = i + 1
+            }
+        }
+    }
+    val entries = mapGet(ast, "entries")
+    if (entries != null) {
+        if (isList(entries) == 1) {
+            val sz = listSize(entries)
+            var i: Int = 0
+            while (i < sz) {
+                val entry = listGet(entries, i)
+                val found = navFindNodeAt(entry, line, col)
+                if (found != null) { return found }
+                i = i + 1
+            }
+        }
+    }
+
+    // Check this node itself
+    if (navNodeInRange(ast, line, col) == 1) {
+        return ast
+    }
+    return null
+}
+
+// ── Declaration finding ─────────────────────────────────────────────────
+
+fun navFindDeclarationNamed(ast: Any, name: String): Map {
+    if (ast == null) { return null }
+    if (isMap(ast) == 0) { return null }
+    val kind = mapGet(ast, "kind")
+    if (kind != null) {
+        val kindStr = toString(kind)
+        // Check if this node is the declaration
+        val nodeName = mapGet(ast, "name")
+        if (nodeName != null) {
+            if (toString(nodeName) == name) {
+                if (kindStr == "funDecl") { return ast }
+                if (kindStr == "classDecl") { return ast }
+                if (kindStr == "interfaceDecl") { return ast }
+                if (kindStr == "enumDecl") { return ast }
+                if (kindStr == "objectDecl") { return ast }
+                if (kindStr == "actorDecl") { return ast }
+                if (kindStr == "viewDecl") { return ast }
+                if (kindStr == "typeAlias") { return ast }
+                if (kindStr == "valDecl") { return ast }
+                if (kindStr == "varDecl") { return ast }
+            }
+        }
+    }
+    // Search children
+    val decls = mapGet(ast, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            val found = navFindDeclarationNamed(listGet(decls, i), name)
+            if (found != null) { return found }
+            i = i + 1
+        }
+    }
+    val body = mapGet(ast, "body")
+    if (body != null) {
+        if (isList(body) == 1) {
+            val sz = listSize(body)
+            var i: Int = 0
+            while (i < sz) {
+                val found = navFindDeclarationNamed(listGet(body, i), name)
+                if (found != null) { return found }
+                i = i + 1
+            }
+        }
+        if (isMap(body) == 1) {
+            val found = navFindDeclarationNamed(body, name)
+            if (found != null) { return found }
+        }
+    }
+    val stmts = mapGet(ast, "statements")
+    if (stmts != null) {
+        val sz = listSize(stmts)
+        var i: Int = 0
+        while (i < sz) {
+            val found = navFindDeclarationNamed(listGet(stmts, i), name)
+            if (found != null) { return found }
+            i = i + 1
+        }
+    }
+    val members = mapGet(ast, "members")
+    if (members != null) {
+        if (isList(members) == 1) {
+            val sz = listSize(members)
+            var i: Int = 0
+            while (i < sz) {
+                val found = navFindDeclarationNamed(listGet(members, i), name)
+                if (found != null) { return found }
+                i = i + 1
+            }
+        }
+    }
+    return null
+}
+
+// ── Symbol collection (for completion) ──────────────────────────────────
+
+fun navCollectSymbols(ast: Any, tc: Any): List {
+    val symbols = listCreate()
+    navCollectSymbolsWalk(ast, symbols)
+    // Add builtin symbols
+    navAddBuiltinSymbols(symbols)
+    return symbols
+}
+
+fun navCollectSymbolsWalk(node: Any, symbols: List): Unit {
+    if (node == null) { return }
+    if (isMap(node) == 0) { return }
+    val kind = mapGet(node, "kind")
+    if (kind == null) { return }
+    val kindStr = toString(kind)
+    val name = mapGet(node, "name")
+    if (name != null) {
+        if (kindStr == "funDecl") { navAddSymbol(symbols, toString(name), "function") }
+        if (kindStr == "classDecl") { navAddSymbol(symbols, toString(name), "class") }
+        if (kindStr == "interfaceDecl") { navAddSymbol(symbols, toString(name), "interface") }
+        if (kindStr == "enumDecl") { navAddSymbol(symbols, toString(name), "enum") }
+        if (kindStr == "objectDecl") { navAddSymbol(symbols, toString(name), "object") }
+        if (kindStr == "actorDecl") { navAddSymbol(symbols, toString(name), "class") }
+        if (kindStr == "viewDecl") { navAddSymbol(symbols, toString(name), "class") }
+        if (kindStr == "valDecl") { navAddSymbol(symbols, toString(name), "variable") }
+        if (kindStr == "varDecl") { navAddSymbol(symbols, toString(name), "variable") }
+        if (kindStr == "typeAlias") { navAddSymbol(symbols, toString(name), "type") }
+    }
+    // Walk children
+    val decls = mapGet(node, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            navCollectSymbolsWalk(listGet(decls, i), symbols)
+            i = i + 1
+        }
+    }
+    val body = mapGet(node, "body")
+    if (body != null) {
+        if (isList(body) == 1) {
+            val sz = listSize(body)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectSymbolsWalk(listGet(body, i), symbols)
+                i = i + 1
+            }
+        }
+        if (isMap(body) == 1) {
+            navCollectSymbolsWalk(body, symbols)
+        }
+    }
+    val stmts = mapGet(node, "statements")
+    if (stmts != null) {
+        val sz = listSize(stmts)
+        var i: Int = 0
+        while (i < sz) {
+            navCollectSymbolsWalk(listGet(stmts, i), symbols)
+            i = i + 1
+        }
+    }
+    val members = mapGet(node, "members")
+    if (members != null) {
+        if (isList(members) == 1) {
+            val sz = listSize(members)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectSymbolsWalk(listGet(members, i), symbols)
+                i = i + 1
+            }
+        }
+    }
+    // Walk parameters
+    val params = mapGet(node, "params")
+    if (params != null) {
+        if (isList(params) == 1) {
+            val sz = listSize(params)
+            var i: Int = 0
+            while (i < sz) {
+                val param = listGet(params, i)
+                if (isMap(param) == 1) {
+                    val pname = mapGet(param, "name")
+                    if (pname != null) {
+                        navAddSymbol(symbols, toString(pname), "parameter")
+                    }
+                }
+                i = i + 1
+            }
+        }
+    }
+}
+
+fun navAddSymbol(symbols: List, name: String, kind: String): Unit {
+    val sym = mapCreate()
+    mapPut(sym, "name", name)
+    mapPut(sym, "kind", kind)
+    listAppend(symbols, sym)
+}
+
+fun navAddBuiltinSymbols(symbols: List): Unit {
+    // I/O
+    navAddSymbol(symbols, "println", "function")
+    navAddSymbol(symbols, "print", "function")
+    navAddSymbol(symbols, "readLine", "function")
+    // Conversion
+    navAddSymbol(symbols, "toString", "function")
+    navAddSymbol(symbols, "toInt", "function")
+    navAddSymbol(symbols, "toFloat", "function")
+    // String
+    navAddSymbol(symbols, "stringLength", "function")
+    navAddSymbol(symbols, "charAt", "function")
+    navAddSymbol(symbols, "charCodeAt", "function")
+    navAddSymbol(symbols, "intToChar", "function")
+    navAddSymbol(symbols, "substring", "function")
+    navAddSymbol(symbols, "stringIndexOf", "function")
+    navAddSymbol(symbols, "startsWith", "function")
+    navAddSymbol(symbols, "endsWith", "function")
+    navAddSymbol(symbols, "stringTrim", "function")
+    // Collections
+    navAddSymbol(symbols, "listCreate", "function")
+    navAddSymbol(symbols, "listAppend", "function")
+    navAddSymbol(symbols, "listGet", "function")
+    navAddSymbol(symbols, "listSet", "function")
+    navAddSymbol(symbols, "listSize", "function")
+    navAddSymbol(symbols, "mapCreate", "function")
+    navAddSymbol(symbols, "mapPut", "function")
+    navAddSymbol(symbols, "mapGet", "function")
+    navAddSymbol(symbols, "mapKeys", "function")
+    // File
+    navAddSymbol(symbols, "fileRead", "function")
+    navAddSymbol(symbols, "fileWrite", "function")
+    navAddSymbol(symbols, "fileExists", "function")
+    // Process
+    navAddSymbol(symbols, "processArgs", "function")
+    navAddSymbol(symbols, "getEnv", "function")
+    navAddSymbol(symbols, "platformOS", "function")
+    navAddSymbol(symbols, "systemExec", "function")
+}
+
+// ── Reference collection (for find-references, rename) ──────────────────
+
+fun navCollectReferences(ast: Any, name: String, uri: String): List {
+    val refs = listCreate()
+    navCollectRefsWalk(ast, name, uri, refs)
+    return refs
+}
+
+fun navCollectRefsWalk(node: Any, name: String, uri: String, refs: List): Unit {
+    if (node == null) { return }
+    if (isMap(node) == 0) { return }
+    val kind = mapGet(node, "kind")
+    if (kind == null) { return }
+    val kindStr = toString(kind)
+
+    // Check identifiers
+    if (kindStr == "ident") {
+        val nodeName = mapGet(node, "name")
+        if (nodeName != null) {
+            if (toString(nodeName) == name) {
+                val line = mapGet(node, "line")
+                val col = mapGet(node, "col")
+                if (line != null) {
+                    val loc = makeLspLocation(uri,
+                        sourceToLspLine(toInt(line)), sourceToLspCol(toInt(col)),
+                        sourceToLspLine(toInt(line)), sourceToLspCol(toInt(col)) + stringLength(name))
+                    listAppend(refs, loc)
+                }
+            }
+        }
+    }
+
+    // Check declaration names
+    val nodeName = mapGet(node, "name")
+    if (nodeName != null) {
+        if (toString(nodeName) == name) {
+            if (kindStr != "ident") {
+                val line = mapGet(node, "line")
+                val col = mapGet(node, "col")
+                if (line != null) {
+                    val loc = makeLspLocation(uri,
+                        sourceToLspLine(toInt(line)), sourceToLspCol(toInt(col)),
+                        sourceToLspLine(toInt(line)), sourceToLspCol(toInt(col)) + stringLength(name))
+                    listAppend(refs, loc)
+                }
+            }
+        }
+    }
+
+    // Walk all children recursively
+    navCollectRefsWalkChildren(node, name, uri, refs)
+}
+
+fun navCollectRefsWalkChildren(node: Any, name: String, uri: String, refs: List): Unit {
+    val decls = mapGet(node, "declarations")
+    if (decls != null) {
+        val sz = listSize(decls)
+        var i: Int = 0
+        while (i < sz) {
+            navCollectRefsWalk(listGet(decls, i), name, uri, refs)
+            i = i + 1
+        }
+    }
+    val body = mapGet(node, "body")
+    if (body != null) {
+        if (isList(body) == 1) {
+            val sz = listSize(body)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectRefsWalk(listGet(body, i), name, uri, refs)
+                i = i + 1
+            }
+        }
+        if (isMap(body) == 1) { navCollectRefsWalk(body, name, uri, refs) }
+    }
+    val stmts = mapGet(node, "statements")
+    if (stmts != null) {
+        val sz = listSize(stmts)
+        var i: Int = 0
+        while (i < sz) {
+            navCollectRefsWalk(listGet(stmts, i), name, uri, refs)
+            i = i + 1
+        }
+    }
+    val members = mapGet(node, "members")
+    if (members != null) {
+        if (isList(members) == 1) {
+            val sz = listSize(members)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectRefsWalk(listGet(members, i), name, uri, refs)
+                i = i + 1
+            }
+        }
+    }
+    val left = mapGet(node, "left")
+    if (left != null) { navCollectRefsWalk(left, name, uri, refs) }
+    val right = mapGet(node, "right")
+    if (right != null) { navCollectRefsWalk(right, name, uri, refs) }
+    val callee = mapGet(node, "callee")
+    if (callee != null) { navCollectRefsWalk(callee, name, uri, refs) }
+    val objNode = mapGet(node, "object")
+    if (objNode != null) { navCollectRefsWalk(objNode, name, uri, refs) }
+    val condition = mapGet(node, "condition")
+    if (condition != null) { navCollectRefsWalk(condition, name, uri, refs) }
+    val value = mapGet(node, "value")
+    if (value != null) {
+        if (isMap(value) == 1) { navCollectRefsWalk(value, name, uri, refs) }
+    }
+    val args = mapGet(node, "args")
+    if (args != null) {
+        if (isList(args) == 1) {
+            val sz = listSize(args)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectRefsWalk(listGet(args, i), name, uri, refs)
+                i = i + 1
+            }
+        }
+    }
+    val entries = mapGet(node, "entries")
+    if (entries != null) {
+        if (isList(entries) == 1) {
+            val sz = listSize(entries)
+            var i: Int = 0
+            while (i < sz) {
+                navCollectRefsWalk(listGet(entries, i), name, uri, refs)
+                i = i + 1
+            }
+        }
+    }
+}
+
+// ── Extract name from node ──────────────────────────────────────────────
+
+fun navExtractName(node: Map): String {
+    if (node == null) { return "" }
+    val kind = toString(mapGet(node, "kind"))
+    if (kind == "ident") {
+        val n = mapGet(node, "name")
+        if (n != null) { return toString(n) }
+    }
+    if (kind == "member") {
+        val n = mapGet(node, "name")
+        if (n != null) { return toString(n) }
+    }
+    val name = mapGet(node, "name")
+    if (name != null) { return toString(name) }
+    return ""
+}
+
+// ── LSP symbol kind mapping ─────────────────────────────────────────────
+
+fun navSymbolKindToLsp(kind: String): Int {
+    if (kind == "function") { return 12 }
+    if (kind == "class") { return 5 }
+    if (kind == "interface") { return 11 }
+    if (kind == "enum") { return 10 }
+    if (kind == "object") { return 19 }
+    if (kind == "variable") { return 13 }
+    if (kind == "parameter") { return 13 }
+    if (kind == "type") { return 26 }
+    if (kind == "property") { return 7 }
+    if (kind == "method") { return 6 }
+    return 13 // default: variable
+}
+
+// ── Completion item kind mapping ────────────────────────────────────────
+
+fun navCompletionKindToLsp(kind: String): Int {
+    if (kind == "function") { return 3 }
+    if (kind == "class") { return 7 }
+    if (kind == "interface") { return 8 }
+    if (kind == "enum") { return 13 }
+    if (kind == "object") { return 19 }
+    if (kind == "variable") { return 6 }
+    if (kind == "parameter") { return 6 }
+    if (kind == "type") { return 25 }
+    if (kind == "keyword") { return 14 }
+    if (kind == "property") { return 10 }
+    if (kind == "method") { return 2 }
+    return 6 // default: variable
+}
+
+// ── isList helper ───────────────────────────────────────────────────────
+
+fun isList(val2: Any): Int {
+    if (val2 == null) { return 0 }
+    // Check if it has listSize behavior
+    val sz = listSize(val2)
+    if (sz >= 0) { return 1 }
+    return 0
+}
