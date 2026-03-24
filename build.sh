@@ -21,8 +21,25 @@ else
     exit 1
 fi
 
-COMPILER_SRC="$COMPILER_DIR/self-hosted-rockit"
-STDLIB="$COMPILER_SRC/stdlib"
+# Support both monorepo (self-hosted-rockit/) and polyrepo (src/) layouts
+if [ -d "$COMPILER_DIR/self-hosted-rockit" ]; then
+    COMPILER_SRC="$COMPILER_DIR/self-hosted-rockit"
+elif [ -d "$COMPILER_DIR/src" ]; then
+    COMPILER_SRC="$COMPILER_DIR/src"
+else
+    echo "Error: Cannot find compiler source in $COMPILER_DIR"
+    exit 1
+fi
+
+# Find stdlib: self-hosted-rockit/stdlib/ or launchpad/
+if [ -d "$COMPILER_SRC/stdlib" ]; then
+    STDLIB="$COMPILER_SRC/stdlib"
+elif [ -d "$COMPILER_DIR/launchpad" ]; then
+    STDLIB="$COMPILER_DIR/launchpad"
+else
+    echo "Error: Cannot find stdlib"
+    exit 1
+fi
 
 echo "Using compiler source: $COMPILER_SRC"
 
