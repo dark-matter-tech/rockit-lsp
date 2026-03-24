@@ -87,13 +87,19 @@ fun intToString(value: Int): String {
 }
 POLYFILL
 
-# 1. Stdlib: only JSON module (minimal dependencies)
+# 1. Stdlib modules
 echo "// === stdlib: encoding/json ===" >> "$OUTPUT"
 strip_main "$STDLIB/rockit/encoding/json.rok" >> "$OUTPUT"
 
-# NOTE: compiler modules (lexer, parser, typechecker) are NOT included.
-# The LSP uses subprocess invocation for analysis instead.
-# This avoids runtime corruption from large concatenated binaries.
+# 2. Compiler modules (for inline analysis)
+echo "// === compiler: lexer ===" >> "$OUTPUT"
+strip_main "$COMPILER_SRC/lexer.rok" >> "$OUTPUT"
+
+echo "// === compiler: parser ===" >> "$OUTPUT"
+strip_main "$COMPILER_SRC/parser.rok" >> "$OUTPUT"
+
+echo "// === compiler: typechecker ===" >> "$OUTPUT"
+strip_main "$COMPILER_SRC/typechecker.rok" >> "$OUTPUT"
 
 # 3. LSP modules (strip main from all except lsp.rok)
 echo "// === lsp: jsonrpc ===" >> "$OUTPUT"

@@ -1,14 +1,62 @@
 // analysis.rok — Compiler pipeline orchestration for LSP
-// Uses subprocess invocation since compiler modules are not concatenated.
+// Invokes lexer → parser → typechecker inline (modules concatenated).
 
 fun analyzeDocument(docMgr: Map, uri: String, kwMap: Map): Map {
-    // For now, return empty analysis — no inline compiler
-    // TODO: invoke `rockit check --json <file>` subprocess for diagnostics
+    val text = docGetText(docMgr, uri)
+    if (stringLength(text) == 0) {
+        val empty = mapCreate()
+        mapPut(empty, "tokens", listCreate())
+        mapPut(empty, "ast", mapCreate())
+        mapPut(empty, "tc", mapCreate())
+        mapPut(empty, "diagnostics", jArr())
+        return empty
+    }
+
+    // Lex
+    val tokens = tokenize(text)
+
+    // Parse
+    val p = makeParser(tokens)
+    val ast = parseProgram(p)
+    val parseErrors = mapGet(p, "errors")
+
+    // Type check
+    val tc = makeTypeChecker(ast)
+    tcGatherDecl(tc)
+    tcCheckDecl(tc)
+    val tcErrors = mapGet(tc, "errors")
+
+    // Collect diagnostics
+    val diagnostics = jArr()
+    if (parseErrors != null) {
+        val peSize = listSize(parseErrors)
+        var pi: Int = 0
+        while (pi < peSize) {
+            val err = toString(listGet(parseErrors, pi))
+            val diag = makeDiagnostic(err, 1)
+            jArrPush(diagnostics, diag)
+            pi = pi + 1
+        }
+    }
+    if (tcErrors != null) {
+        val teSize = listSize(tcErrors)
+        var ti: Int = 0
+        while (ti < teSize) {
+            val err = toString(listGet(tcErrors, ti))
+            val diag = makeDiagnostic(err, 1)
+            jArrPush(diagnostics, diag)
+            ti = ti + 1
+        }
+    }
+
+    // Cache results
+    docSetAnalysis(docMgr, uri, tokens, ast, tc, diagnostics)
+
     val result = mapCreate()
-    mapPut(result, "tokens", listCreate())
-    mapPut(result, "ast", mapCreate())
-    mapPut(result, "tc", mapCreate())
-    mapPut(result, "diagnostics", jArr())
+    mapPut(result, "tokens", tokens)
+    mapPut(result, "ast", ast)
+    mapPut(result, "tc", tc)
+    mapPut(result, "diagnostics", diagnostics)
     return result
 }
 
@@ -20,9 +68,41 @@ fun getOrAnalyze(docMgr: Map, uri: String, kwMap: Map): Map {
 
 fun makeDiagnostic(message: String, severity: Int): Map {
     val diag = jsonObject()
-    jPutObj(diag, "range", makeLspRange(0, 0, 0, 1))
+    var line: Int = 0
+    var col: Int = 0
+    var msg: String = message
+
+    // Parse "file:line:col: error: message" format
+    val idx1 = stringIndexOf(message, ":")
+    if (idx1 > 0) {
+        val after1 = substring(message, idx1 + 1, stringLength(message))
+        val idx2 = stringIndexOf(after1, ":")
+        if (idx2 > 0) {
+            val lineStr = substring(after1, 0, idx2)
+            val lineNum = toInt(lineStr)
+            if (lineNum > 0) {
+                line = lineNum - 1
+                val after2 = substring(after1, idx2 + 1, stringLength(after1))
+                val idx3 = stringIndexOf(after2, ":")
+                if (idx3 > 0) {
+                    val colStr = substring(after2, 0, idx3)
+                    val colNum = toInt(colStr)
+                    if (colNum > 0) {
+                        col = colNum - 1
+                    }
+                    val rest = substring(after2, idx3 + 1, stringLength(after2))
+                    msg = stringTrim(rest)
+                    if (startsWith(msg, "error: ") == 1) {
+                        msg = substring(msg, 7, stringLength(msg))
+                    }
+                }
+            }
+        }
+    }
+
+    jPutObj(diag, "range", makeLspRange(line, col, line, col + 1))
     jPutInt(diag, "severity", severity)
     jPutStr(diag, "source", "rockit")
-    jPutStr(diag, "message", message)
+    jPutStr(diag, "message", msg)
     return diag
 }
