@@ -104,9 +104,16 @@ fun intToString(value: Int): String {
 }
 POLYFILL
 
-# 1. Stdlib modules
+# 1. Stdlib modules — find json.rok in either layout
 echo "// === stdlib: encoding/json ===" >> "$OUTPUT"
-strip_main "$STDLIB/rockit/encoding/json.rok" >> "$OUTPUT"
+if [ -f "$STDLIB/rockit/encoding/json.rok" ]; then
+    strip_main "$STDLIB/rockit/encoding/json.rok" >> "$OUTPUT"
+elif [ -f "$STDLIB/rockit/json.rok" ]; then
+    strip_main "$STDLIB/rockit/json.rok" >> "$OUTPUT"
+else
+    echo "Error: Cannot find json.rok in stdlib"
+    exit 1
+fi
 
 # 2. Compiler modules (for inline analysis)
 echo "// === compiler: lexer ===" >> "$OUTPUT"
