@@ -182,14 +182,21 @@ ROCKIT_BIN="$(which rockit 2>/dev/null || true)"
 if [ -n "$ROCKIT_BIN" ]; then
     echo "Compiling with Stage 0..."
     "$ROCKIT_BIN" build-native "$OUTPUT" -o rockit-lsp 2>&1
-    # Stage 0 outputs to name without -o in some cases
-    if [ -f "lsp_combined" ] && [ ! -f "rockit-lsp" ]; then
-        mv lsp_combined rockit-lsp
-    fi
 else
     echo "Compiling with Stage 1..."
     "$COMMAND" build-native "$OUTPUT" --runtime-path "$RUNTIME" -o rockit-lsp 2>&1
 fi
 
-echo "Built: rockit-lsp"
-ls -la rockit-lsp
+# Stage 0 may output as lsp_combined instead of rockit-lsp
+if [ ! -f "rockit-lsp" ] && [ -f "lsp_combined" ]; then
+    mv lsp_combined rockit-lsp
+fi
+
+if [ -f "rockit-lsp" ]; then
+    echo "Built: rockit-lsp"
+    ls -la rockit-lsp
+else
+    echo "ERROR: rockit-lsp binary not found"
+    ls -la *.rok lsp_combined* 2>/dev/null
+    exit 1
+fi
